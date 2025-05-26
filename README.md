@@ -1,6 +1,6 @@
-# mygvc
+# gvc
 
-`mygvc` is a simplified version control system written in Go, inspired by Git. It supports basic functionality like initializing a repository, hashing file contents as Git-style blobs, and reading stored objects.
+`gvc` is a simplified version control system written in Go, inspired by Git. It supports basic functionality like initializing a repository, hashing file contents as Git-style blobs, and reading stored objects.
 
 ---
 
