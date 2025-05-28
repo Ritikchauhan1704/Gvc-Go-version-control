@@ -1,6 +1,6 @@
 # 🧪 gvc — Go Version Control
 
-`gvc` is a minimal, Git-inspired version control system written in Go. It stores file contents as Git-style objects, manages trees, and handles repository metadata.
+`gvc` is a minimal, Git-inspired version control system written in Go. It mirrors some of Git's core features, such as storing file contents as Git-style objects, managing trees, and handling repository metadata.
 
 ---
 
@@ -15,17 +15,22 @@
   Hashes a file and stores it as a Git-style compressed blob object.
 
 - **`cat-file`**  
-  Decompresses and prints the contents of a stored object.
+  Decompresses and prints the contents of a stored blob object.
 
 - **`ls-tree`**  
-  Lists the contents of a tree object (snapshot of a directory).
+  Lists the contents of a tree object (snapshot of the directory structure).
 
 - **`write-tree`**  
-  Creates a tree object representing the current index state.
+  Creates a tree object representing the current working directory.
 
-- **`commit-tree`**  
-  Creates a commit object from a tree SHA, optional parent, and message.
+- **`add`**  
+  Adds files to the **index** (staging area) to include in the next commit.
 
+- **`commit`**  
+  Records a snapshot of the project state with metadata (author, message, timestamp, etc.).
+
+- **`log`**  
+  Displays the commit history from the current branch.
 ---
 
 ## 🔧 Commands & Usage
@@ -34,29 +39,25 @@
 # Initialize repository
 $ gvc init
 
-# Hash a file and store it as a blob object
+# Hash a file and store it
 $ gvc hash-object -w file.txt
 
 # View object content by hash
 $ gvc cat-file -p <object-sha>
 
-# Write a tree from current index
+# Write a tree from working directory
 $ gvc write-tree
 
 # List the contents of a tree object
 $ gvc ls-tree <tree-sha>
+```
 
-# Create an initial commit (no parent)
-$ gvc commit-tree <tree-sha> -p \"\" -m \"Initial commit\"
-
-# Create a commit with a parent
-$ gvc commit-tree <new-tree-sha> -p <parent-commit-sha> -m \"Second commit\"
+---
 
 ## 🧩 Work in Progress (TODO)
 
-- **`add .`**  
-  currently . is not supported with add 
-  
+- **`add .`**
+  . is not supported with add as of now
 - **`clone`**  
   Initializes a new gvc repository from a remote one (placeholder for now).
 
@@ -82,8 +83,7 @@ $ gvc commit-tree <new-tree-sha> -p <parent-commit-sha> -m \"Second commit\"
 ├── objects/       # Stores all objects (blobs, trees, commits)
 ├── refs/          # Stores references to branches
 └── HEAD           # Points to the current branch
-└── index          # staging area (stores info of the files using add command)
-
+└── index          # staging area
 ```
 
 ## Built With
