@@ -50,6 +50,19 @@ $ gvc write-tree
 
 # List the contents of a tree object
 $ gvc ls-tree <tree-sha>
+
+# commit the tree object
+$ gvc commit-tree <tree-sha> -p <parent-sha> -m "message"
+
+# adds files to the staging area
+$ gvc add <file-name>
+
+# commit the files from the staging area
+$ gvc commit -m "message"
+
+# show all the commits
+$ gvc log"
+
 ```
 
 ---
@@ -57,7 +70,8 @@ $ gvc ls-tree <tree-sha>
 ## 🧩 Work in Progress (TODO)
 
 - **`add .`**
-  . is not supported with add as of now
+  '.' is not supported with add as of now
+
 - **`clone`**  
   Initializes a new gvc repository from a remote one (placeholder for now).
 
