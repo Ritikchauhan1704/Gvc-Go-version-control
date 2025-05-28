@@ -23,6 +23,8 @@
 - **`write-tree`**  
   Creates a tree object representing the current working directory.
 
+- **`commit-tree`**  
+  Creates a commit object with the specified tree, parent, and commit message
 ---
 
 ## 🔧 Commands & Usage
@@ -42,6 +44,14 @@ $ gvc write-tree
 
 # List the contents of a tree object
 $ gvc ls-tree <tree-sha>
+
+# Create a commit (initial commit without parent)
+$ ./gvc commit-tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904 -p "" -m "Initial commit"
+7d865e959b2466918c9863afca942d0fb89d7c9a
+
+# Create a commit with parent
+$ ./gvc commit-tree <new-tree-hash> -p 7d865e959b2466918c9863afca942d0fb89d7c9a -m "Second commit"
+
 ```
 
 ---

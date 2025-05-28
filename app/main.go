@@ -10,18 +10,42 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	// "reflect"
+	"sort"
+	"time"
 )
 
-// initializeRepo sets up a new .gvc directory structure if it doesn't already exist.
+const (
+	GvcDir     = ".gvc"
+	ObjectsDir = ".gvc/objects"
+	RefsDir    = ".gvc/refs"
+	HeadFile   = ".gvc/HEAD"
+)
 
+// ObjectType represents the type of Git object
+type ObjectType string
+
+const (
+	BlobObject   ObjectType = "blob"
+	TreeObject   ObjectType = "tree"
+	CommitObject ObjectType = "commit"
+)
+
+// TreeEntry represents an entry in a tree object
+type TreeEntry struct {
+	Mode string
+	Name string
+	SHA  string
+	Type ObjectType
+}
+
+// initializeRepo sets up a new .gvc directory structure if it doesn't already exist.
 func initializeRepo() error {
-	if _, err := os.Stat(".gvc"); err == nil {
+	if _, err := os.Stat(GvcDir); err == nil {
 		return errors.New("gvc repository already initialized")
 	}
 
 	// Create required subdirectories
-	dirs := []string{".gvc", ".gvc/objects", ".gvc/refs"}
+	dirs := []string{GvcDir, ObjectsDir, RefsDir}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
@@ -30,7 +54,7 @@ func initializeRepo() error {
 
 	// Write the HEAD reference to point to main branch
 	headContent := []byte("ref: refs/heads/main\n")
-	if err := os.WriteFile(".gvc/HEAD", headContent, 0644); err != nil {
+	if err := os.WriteFile(HeadFile, headContent, 0644); err != nil {
 		return fmt.Errorf("failed to write HEAD file: %w", err)
 	}
 
@@ -38,176 +62,243 @@ func initializeRepo() error {
 	return nil
 }
 
-// catFile prints the contents of a gvc object (like Git's cat-file -p).
-func catFile(hash string) error {
-	if len(hash) < 40 {
-		return errors.New("invalid hash length")
+// validateSHA checks if the provided SHA is valid
+func validateSHA(sha string) error {
+	if len(sha) != 40 {
+		return fmt.Errorf("invalid SHA length: expected 40, got %d", len(sha))
+	}
+	if _, err := hex.DecodeString(sha); err != nil {
+		return fmt.Errorf("invalid SHA format: %w", err)
+	}
+	return nil
+}
+
+// getObjectPath returns the file path for a given object SHA
+func getObjectPath(sha string) string {
+	return filepath.Join(ObjectsDir, sha[:2], sha[2:])
+}
+
+// readObject reads and decompresses a Git object
+func readObject(sha string) (ObjectType, []byte, error) {
+	if err := validateSHA(sha); err != nil {
+		return "", nil, err
 	}
 
-	// Build path to the object using hash
-	objPath := filepath.Join(".gvc", "objects", hash[:2], hash[2:])
+	objPath := getObjectPath(sha)
 	data, err := os.ReadFile(objPath)
 	if err != nil {
-		return fmt.Errorf("failed to read gvc object: %w", err)
+		return "", nil, fmt.Errorf("failed to read object %s: %w", sha, err)
 	}
 
 	// Decompress the object
 	zr, err := zlib.NewReader(bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("failed to decompress object: %w", err)
+		return "", nil, fmt.Errorf("failed to decompress object: %w", err)
 	}
 	defer zr.Close()
 
 	// Read the object header (e.g., "blob 14")
-	var contentType string
+	var objectType string
 	var contentLength int
-	if _, err := fmt.Fscanf(zr, "%s %d\x00", &contentType, &contentLength); err != nil {
-		return fmt.Errorf("failed to parse object header: %w", err)
+	if _, err := fmt.Fscanf(zr, "%s %d\x00", &objectType, &contentLength); err != nil {
+		return "", nil, fmt.Errorf("failed to parse object header: %w", err)
 	}
 
 	// Read and verify the content
 	content, err := io.ReadAll(zr)
 	if err != nil {
-		return fmt.Errorf("failed to read decompressed content: %w", err)
-	}
-	if len(content) != contentLength {
-		return fmt.Errorf("content length mismatch: expected %d, got %d", contentLength, len(content))
+		return "", nil, fmt.Errorf("failed to read decompressed content: %w", err)
 	}
 
-	// Print the actual blob content
-	fmt.Printf("%s", content)
-	return nil
+	if len(content) != contentLength {
+		return "", nil, fmt.Errorf("content length mismatch: expected %d, got %d", contentLength, len(content))
+	}
+
+	return ObjectType(objectType), content, nil
 }
 
-// hashObject reads a file, wraps it in a Git-style blob, compresses, hashes, and stores it.
-func hashObject(fpath string) error {
-	// Read file contents
-	data, err := os.ReadFile(fpath)
-	if err != nil {
-		return fmt.Errorf("failed to read file %s: %w", fpath, err)
-	}
+// writeObject compresses and stores an object, returning its SHA
+func writeObject(objectType ObjectType, content []byte) (string, error) {
+	// Prepare the object header
+	header := fmt.Sprintf("%s %d\x00", objectType, len(content))
+	fullContent := append([]byte(header), content...)
 
-	// Prepare the blob object header
-	header := fmt.Sprintf("blob %d\x00", len(data))
-	fullContent := append([]byte(header), data...)
+	// Generate SHA-1 hash
+	hashBytes := sha1.Sum(fullContent)
+	sha := hex.EncodeToString(hashBytes[:])
 
-	// Compress the blob
+	// Compress the object
 	var compressed bytes.Buffer
 	w := zlib.NewWriter(&compressed)
 	if _, err := w.Write(fullContent); err != nil {
-		return fmt.Errorf("failed to compress object: %w", err)
+		return "", fmt.Errorf("failed to compress object: %w", err)
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		return "", fmt.Errorf("failed to close compressor: %w", err)
+	}
 
-	// Generate SHA-1 hash of the blob
-	hashBytes := sha1.Sum(fullContent)
-	hash := hex.EncodeToString(hashBytes[:])
+	// Store the compressed object
+	objDir := filepath.Join(ObjectsDir, sha[:2])
+	objPath := filepath.Join(objDir, sha[2:])
 
-	// Determine object path based on the hash
-	objDir := filepath.Join(".gvc", "objects", hash[:2])
-	objPath := filepath.Join(objDir, hash[2:])
-
-	// Create directory and store the compressed object
 	if err := os.MkdirAll(objDir, 0755); err != nil {
-		return fmt.Errorf("failed to create object directory: %w", err)
+		return "", fmt.Errorf("failed to create object directory: %w", err)
 	}
+
 	if err := os.WriteFile(objPath, compressed.Bytes(), 0644); err != nil {
-		return fmt.Errorf("failed to write object: %w", err)
+		return "", fmt.Errorf("failed to write object: %w", err)
 	}
 
-	// Output the SHA-1 hash
-	fmt.Println(hash)
+	return sha, nil
+}
+
+// catFile prints the contents of a gvc object (like Git's cat-file -p)
+func catFile(sha string) error {
+	objectType, content, err := readObject(sha)
+	if err != nil {
+		return err
+	}
+
+	switch objectType {
+	case BlobObject:
+		fmt.Print(string(content))
+	case TreeObject, CommitObject:
+		fmt.Print(string(content))
+	default:
+		return fmt.Errorf("unknown object type: %s", objectType)
+	}
+
 	return nil
 }
 
-func lsTree(treeSha string, flag string) error {
-	objPath := filepath.Join(".gvc", "objects", treeSha[:2], treeSha[2:])
-	data, err := os.ReadFile(objPath)
+// hashObject reads a file, creates a blob object, and stores it
+func hashObject(filepath string) error {
+	data, err := os.ReadFile(filepath)
 	if err != nil {
-		return fmt.Errorf("failed to read gvc object: %w", err)
+		return fmt.Errorf("failed to read file %s: %w", filepath, err)
 	}
 
-	// Decompress the object
-	zr, err := zlib.NewReader(bytes.NewReader(data))
+	sha, err := writeObject(BlobObject, data)
 	if err != nil {
-		return fmt.Errorf("failed to decompress object: %w", err)
+		return err
 	}
-	defer zr.Close()
 
-	var contentType string
-	var contentLength int
-	if _, err := fmt.Fscanf(zr, "%s %d\x00", &contentType, &contentLength); err != nil {
-		return fmt.Errorf("failed to parse object header: %w", err)
-	}
-	if contentType != "tree" {
-		return fmt.Errorf("expected tree object, got %s", contentType)
-	}
-	// Read and verify the content
-	content, err := io.ReadAll(zr)
-	if err != nil {
-		return fmt.Errorf("failed to read tree: %w", err)
-	}
-	ind := 0
-	for ind < len(content) {
-		modeStart := ind
-		for content[ind] != ' ' {
-			ind++
+	fmt.Println(sha)
+	return nil
+}
+
+// parseTreeEntries parses tree object content into structured entries
+func parseTreeEntries(content []byte) ([]TreeEntry, error) {
+	var entries []TreeEntry
+	index := 0
+
+	for index < len(content) {
+		// Read mode
+		modeStart := index
+		for index < len(content) && content[index] != ' ' {
+			index++
 		}
-		mode := string(content[modeStart : ind])
-		ind++ // skip space
-		
-		nameStart := ind
-		for content[ind] != 0 {
-			ind++
+		if index >= len(content) {
+			return nil, errors.New("malformed tree: missing space after mode")
 		}
-		name := string(content[nameStart:ind])
-		ind++ // skip null byte
+		mode := string(content[modeStart:index])
+		index++ // skip space
 
-		// Read 20 bytes of SHA-1 (raw binary)
-		shaBytes := content[ind : ind + 20]
+		// Read name
+		nameStart := index
+		for index < len(content) && content[index] != 0 {
+			index++
+		}
+		if index >= len(content) {
+			return nil, errors.New("malformed tree: missing null byte after name")
+		}
+		name := string(content[nameStart:index])
+		index++ // skip null byte
+
+		// Read SHA (20 bytes)
+		if index+20 > len(content) {
+			return nil, errors.New("malformed tree: incomplete SHA")
+		}
+		shaBytes := content[index : index+20]
 		sha := hex.EncodeToString(shaBytes)
-		ind += 20
+		index += 20
 
-		if flag == "--name-only" {
-			fmt.Println(name)
+		// Determine object type based on mode
+		var objType ObjectType
+		switch mode {
+		case "40000":
+			objType = TreeObject
+		default:
+			objType = BlobObject
+		}
+
+		entries = append(entries, TreeEntry{
+			Mode: mode,
+			Name: name,
+			SHA:  sha,
+			Type: objType,
+		})
+	}
+
+	return entries, nil
+}
+
+// lsTree lists the contents of a tree object
+func lsTree(treeSHA string, nameOnly bool) error {
+	objectType, content, err := readObject(treeSHA)
+	if err != nil {
+		return err
+	}
+
+	if objectType != TreeObject {
+		return fmt.Errorf("expected tree object, got %s", objectType)
+	}
+
+	entries, err := parseTreeEntries(content)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if nameOnly {
+			fmt.Println(entry.Name)
 		} else {
-			objType := "blob"
-			if mode == "40000" {
-				objType = "tree"
-			}
-			fmt.Printf("%s %s %s\t%s\n", mode, objType, sha, name)
+			fmt.Printf("%s %s %s\t%s\n", entry.Mode, entry.Type, entry.SHA, entry.Name)
 		}
 	}
+
 	return nil
 }
 
+// writeTree recursively creates tree objects for a directory
 func writeTree(basePath string) (string, error) {
-	var treeEntries []byte
-
 	dirEntries, err := os.ReadDir(basePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read directory %s: %w", basePath, err)
 	}
 
+	var treeEntries []TreeEntry
+
 	for _, entry := range dirEntries {
 		name := entry.Name()
 
 		// Skip .gvc directory
-		if name == ".gvc" {
+		if name == GvcDir {
 			continue
 		}
 
 		fullPath := filepath.Join(basePath, name)
-
-		var entrySha string
+		var entrySHA string
 		var entryMode string
+		var entryType ObjectType
 
 		if entry.IsDir() {
-			entrySha, err = writeTree(fullPath)
+			entrySHA, err = writeTree(fullPath)
 			if err != nil {
 				return "", err
 			}
 			entryMode = "40000"
+			entryType = TreeObject
 		} else {
 			// Read file and create blob
 			data, err := os.ReadFile(fullPath)
@@ -215,71 +306,137 @@ func writeTree(basePath string) (string, error) {
 				return "", fmt.Errorf("failed to read file %s: %w", fullPath, err)
 			}
 
-			header := fmt.Sprintf("blob %d\x00", len(data))
-			fullContent := append([]byte(header), data...)
-
-			// Compress the blob
-			var compressed bytes.Buffer
-			w := zlib.NewWriter(&compressed)
-			if _, err := w.Write(fullContent); err != nil {
-				return "", fmt.Errorf("failed to compress blob: %w", err)
-			}
-			w.Close()
-
-			// Hash it
-			hash := sha1.Sum(fullContent)
-			entrySha = hex.EncodeToString(hash[:])
-
-			// Save it
-			objDir := filepath.Join(".gvc", "objects", entrySha[:2])
-			objPath := filepath.Join(objDir, entrySha[2:])
-			if err := os.MkdirAll(objDir, 0755); err != nil {
-				return "", fmt.Errorf("failed to create blob directory: %w", err)
-			}
-			if err := os.WriteFile(objPath, compressed.Bytes(), 0644); err != nil {
-				return "", fmt.Errorf("failed to write blob: %w", err)
+			entrySHA, err = writeObject(BlobObject, data)
+			if err != nil {
+				return "", err
 			}
 
 			entryMode = "100644"
+			entryType = BlobObject
 		}
 
-		// Build tree entry: <mode> <name>\0<20-byte SHA>
-		treeEntry := fmt.Sprintf("%s %s", entryMode, name)
-		treeEntryBytes := append([]byte(treeEntry), 0)
-		shaBytes, _ := hex.DecodeString(entrySha)
-		treeEntryBytes = append(treeEntryBytes, shaBytes...)
-
-		treeEntries = append(treeEntries, treeEntryBytes...)
+		treeEntries = append(treeEntries, TreeEntry{
+			Mode: entryMode,
+			Name: name,
+			SHA:  entrySHA,
+			Type: entryType,
+		})
 	}
 
-	// Now make the tree object
-	treeHeader := fmt.Sprintf("tree %d\x00", len(treeEntries))
-	treeObject := append([]byte(treeHeader), treeEntries...)
+	// Sort entries by name (Git requirement)
+	sort.Slice(treeEntries, func(i, j int) bool {
+		return treeEntries[i].Name < treeEntries[j].Name
+	})
 
-	// Compress tree
-	var compressedTree bytes.Buffer
-	zw := zlib.NewWriter(&compressedTree)
-	if _, err := zw.Write(treeObject); err != nil {
-		return "", fmt.Errorf("failed to compress tree: %w", err)
-	}
-	zw.Close()
-
-	treeHash := sha1.Sum(treeObject)
-	treeSha := hex.EncodeToString(treeHash[:])
-
-	objDir := filepath.Join(".gvc", "objects", treeSha[:2])
-	objPath := filepath.Join(objDir, treeSha[2:])
-	if err := os.MkdirAll(objDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create tree object dir: %w", err)
-	}
-	if err := os.WriteFile(objPath, compressedTree.Bytes(), 0644); err != nil {
-		return "", fmt.Errorf("failed to write tree object: %w", err)
+	// Build tree content
+	var treeContent bytes.Buffer
+	for _, entry := range treeEntries {
+		// Format: <mode> <name>\0<20-byte SHA>
+		treeContent.WriteString(fmt.Sprintf("%s %s", entry.Mode, entry.Name))
+		treeContent.WriteByte(0)
+		shaBytes, _ := hex.DecodeString(entry.SHA)
+		treeContent.Write(shaBytes)
 	}
 
-	// fmt.Println(treeSha)
-	return treeSha, nil
+	return writeObject(TreeObject, treeContent.Bytes())
 }
 
+// commitTree creates a commit object
+func commitTree(treeSHA, parentSHA, message string) (string, error) {
+	if err := validateSHA(treeSHA); err != nil {
+		return "", fmt.Errorf("invalid tree SHA: %w", err)
+	}
+
+	if parentSHA != "" {
+		if err := validateSHA(parentSHA); err != nil {
+			return "", fmt.Errorf("invalid parent SHA: %w", err)
+		}
+	}
+
+	author := "gvc <Ritik Chauhan> <critik1704@gmail.com>"
+	timestamp := fmt.Sprintf("%d +0000", time.Now().Unix())
+
+	var commitContent bytes.Buffer
+	commitContent.WriteString(fmt.Sprintf("tree %s\n", treeSHA))
+	if parentSHA != "" {
+		commitContent.WriteString(fmt.Sprintf("parent %s\n", parentSHA))
+	}
+	commitContent.WriteString(fmt.Sprintf("author %s %s\ncommitter %s %s\n\n%s\n",
+		author, timestamp, author, timestamp, message))
+
+	return writeObject(CommitObject, commitContent.Bytes())
+}
+
+// Command handlers
+func handleInit() error {
+	return initializeRepo()
+}
+
+func handleCatFile(args []string) error {
+	if len(args) < 2 || args[0] != "-p" {
+		return errors.New("usage: gvc cat-file -p <hash>")
+	}
+	return catFile(args[1])
+}
+
+func handleHashObject(args []string) error {
+	if len(args) < 2 || args[0] != "-w" {
+		return errors.New("usage: gvc hash-object -w <file>")
+	}
+	return hashObject(args[1])
+}
+
+func handleLsTree(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: gvc ls-tree [--name-only] <tree-sha>")
+	}
+
+	var nameOnly bool
+	var treeSHA string
+
+	if len(args) == 1 {
+		treeSHA = args[0]
+	} else if len(args) == 2 && args[0] == "--name-only" {
+		nameOnly = true
+		treeSHA = args[1]
+	} else {
+		return errors.New("usage: gvc ls-tree [--name-only] <tree-sha>")
+	}
+
+	return lsTree(treeSHA, nameOnly)
+}
+
+func handleWriteTree(args []string) error {
+	if len(args) > 0 {
+		return errors.New("usage: gvc write-tree")
+	}
+
+	treeSHA, err := writeTree(".")
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(treeSHA)
+	return nil
+}
+
+func handleCommitTree(args []string) error {
+	if len(args) < 5 || args[1] != "-p" || args[3] != "-m" {
+		return errors.New("usage: gvc commit-tree <tree_sha> -p <parent_sha> -m <commit_message>")
+	}
+
+	treeSHA := args[0]
+	parentSHA := args[2]
+	message := args[4]
+
+	commitSHA, err := commitTree(treeSHA, parentSHA, message)
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(commitSHA)
+	return nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -288,67 +445,30 @@ func main() {
 	}
 
 	command := os.Args[1]
+	args := os.Args[2:]
+
+	var err error
+
 	switch command {
 	case "init":
-		// Initialize .gvc directory
-		if err := initializeRepo(); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
+		err = handleInit()
 	case "cat-file":
-		// Print contents of a blob object
-		if len(os.Args) < 4 {
-			fmt.Fprintln(os.Stderr, "usage: gvc cat-file -p <hash>")
-			os.Exit(1)
-		}
-		if err := catFile(os.Args[3]); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
+		err = handleCatFile(args)
 	case "hash-object":
-		// Hash a file and store it as a blob
-		if len(os.Args) < 4 {
-			fmt.Fprintln(os.Stderr, "usage: gvc hash-object -w <file>")
-			os.Exit(1)
-		}
-		if err := hashObject(os.Args[3]); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
+		err = handleHashObject(args)
 	case "ls-tree":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: gvc ls-tree [--name-only] <tree-sha>")
-			os.Exit(1)
-		}
-		var flag, treesha string
-		if len(os.Args) == 3 {
-			treesha = os.Args[2]
-		} else if len(os.Args) == 4 {
-			flag = os.Args[2]
-			treesha = os.Args[3]
-			if flag != "--name-only" {
-				fmt.Fprintln(os.Stderr, "usage: gvc ls-tree [--name-only] <tree-sha>")
-				os.Exit(1)
-			}
-		}
-		if err := lsTree(treesha, flag); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
+		err = handleLsTree(args)
 	case "write-tree":
-		if len(os.Args) > 2 {
-			fmt.Fprintln(os.Stderr, "usage: gvc write-tree")
-			os.Exit(1)
-		}
-		treeSha, err := writeTree(".");
-		if  err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
-		fmt.Println(treeSha)
+		err = handleWriteTree(args)
+	case "commit-tree":
+		err = handleCommitTree(args)
 	default:
-		// Unknown command
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
+		os.Exit(1)
+	}
+
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 }
