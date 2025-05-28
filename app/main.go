@@ -5,12 +5,15 @@ import (
 	"compress/zlib"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -19,6 +22,7 @@ const (
 	ObjectsDir = ".gvc/objects"
 	RefsDir    = ".gvc/refs"
 	HeadFile   = ".gvc/HEAD"
+	IndexFile  = ".gvc/index"
 )
 
 // ObjectType represents the type of Git object
@@ -38,6 +42,30 @@ type TreeEntry struct {
 	Type ObjectType
 }
 
+// IndexEntry represents a file in the staging area
+type IndexEntry struct {
+	Path    string    `json:"path"`
+	SHA     string    `json:"sha"`
+	Mode    string    `json:"mode"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"mod_time"`
+}
+
+// Index represents the staging area
+type Index struct {
+	Entries []IndexEntry `json:"entries"`
+}
+
+// CommitInfo represents parsed commit information
+type CommitInfo struct {
+	SHA       string
+	TreeSHA   string
+	ParentSHA string
+	Author    string
+	Message   string
+	Timestamp time.Time
+}
+
 // initializeRepo sets up a new .gvc directory structure if it doesn't already exist.
 func initializeRepo() error {
 	if _, err := os.Stat(GvcDir); err == nil {
@@ -45,7 +73,7 @@ func initializeRepo() error {
 	}
 
 	// Create required subdirectories
-	dirs := []string{GvcDir, ObjectsDir, RefsDir}
+	dirs := []string{GvcDir, ObjectsDir, RefsDir, RefsDir + "/heads"}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
@@ -56,6 +84,12 @@ func initializeRepo() error {
 	headContent := []byte("ref: refs/heads/main\n")
 	if err := os.WriteFile(HeadFile, headContent, 0644); err != nil {
 		return fmt.Errorf("failed to write HEAD file: %w", err)
+	}
+
+	// Initialize empty index
+	emptyIndex := Index{Entries: []IndexEntry{}}
+	if err := writeIndex(&emptyIndex); err != nil {
+		return fmt.Errorf("failed to initialize index: %w", err)
 	}
 
 	fmt.Println("Initialized empty gvc repository")
@@ -152,6 +186,154 @@ func writeObject(objectType ObjectType, content []byte) (string, error) {
 	return sha, nil
 }
 
+// Index management functions
+func readIndex() (*Index, error) {
+	data, err := os.ReadFile(IndexFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &Index{Entries: []IndexEntry{}}, nil
+		}
+		return nil, fmt.Errorf("failed to read index: %w", err)
+	}
+
+	var index Index
+	if err := json.Unmarshal(data, &index); err != nil {
+		return nil, fmt.Errorf("failed to parse index: %w", err)
+	}
+
+	return &index, nil
+}
+
+func writeIndex(index *Index) error {
+	data, err := json.MarshalIndent(index, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal index: %w", err)
+	}
+
+	if err := os.WriteFile(IndexFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write index: %w", err)
+	}
+
+	return nil
+}
+
+// getCurrentBranchRef returns the current branch reference
+func getCurrentBranchRef() (string, error) {
+	headData, err := os.ReadFile(HeadFile)
+	if err != nil {
+		return "", fmt.Errorf("failed to read HEAD: %w", err)
+	}
+
+	headContent := strings.TrimSpace(string(headData))
+	if strings.HasPrefix(headContent, "ref: ") {
+		return strings.TrimPrefix(headContent, "ref: "), nil
+	}
+	// HEAD points directly to a commit (detached HEAD)
+	return "", nil
+}
+
+// getCurrentCommit returns the SHA of the current commit
+func getCurrentCommit() (string, error) {
+	branchRef, err := getCurrentBranchRef()
+	if err != nil {
+		return "", err
+	}
+
+	if branchRef == "" {
+		// Detached HEAD
+		headData, err := os.ReadFile(HeadFile)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(headData)), nil
+	}
+
+	// Read branch reference
+	branchFile := filepath.Join(GvcDir, branchRef)
+	data, err := os.ReadFile(branchFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil // No commits yet
+		}
+		return "", fmt.Errorf("failed to read branch ref: %w", err)
+	}
+
+	return strings.TrimSpace(string(data)), nil
+}
+
+// updateBranchRef updates the current branch to point to a commit
+func updateBranchRef(commitSHA string) error {
+	branchRef, err := getCurrentBranchRef()
+	if err != nil {
+		return err
+	}
+
+	if branchRef == "" {
+		return errors.New("cannot update detached HEAD")
+	}
+
+	branchFile := filepath.Join(GvcDir, branchRef)
+	if err := os.MkdirAll(filepath.Dir(branchFile), 0755); err != nil {
+		return fmt.Errorf("failed to create branch directory: %w", err)
+	}
+
+	if err := os.WriteFile(branchFile, []byte(commitSHA+"\n"), 0644); err != nil {
+		return fmt.Errorf("failed to write branch ref: %w", err)
+	}
+
+	return nil
+}
+
+// parseCommit parses a commit object and returns CommitInfo
+func parseCommit(commitSHA string, content []byte) (*CommitInfo, error) {
+	lines := strings.Split(string(content), "\n")
+	
+	commit := &CommitInfo{SHA: commitSHA}
+	messageStart := -1
+
+	for i, line := range lines {
+		if line == "" {
+			messageStart = i + 1
+			break
+		}
+
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) < 2 {
+			continue
+		}
+
+		switch parts[0] {
+		case "tree":
+			commit.TreeSHA = parts[1]
+		case "parent":
+			commit.ParentSHA = parts[1]
+		case "author":
+			// Parse author and timestamp
+			authorParts := strings.Split(parts[1], " ")
+			if len(authorParts) >= 2 {
+				timestamp := authorParts[len(authorParts)-2]
+				ts := time.Unix(parseInt64(timestamp), 0);					commit.Timestamp = ts
+
+				commit.Author = strings.Join(authorParts[:len(authorParts)-2], " ")
+			}
+		}
+	}
+
+	if messageStart > 0 && messageStart < len(lines) {
+		commit.Message = strings.Join(lines[messageStart:], "\n")
+		commit.Message = strings.TrimSpace(commit.Message)
+	}
+
+	return commit, nil
+}
+
+func parseInt64(s string) int64 {
+    if ts, err := strconv.ParseInt(s, 10, 64); err == nil {
+        return ts
+    }
+    fmt.Printf("warning: could not parse timestamp %q\n", s)
+    return 0
+}
 // catFile prints the contents of a gvc object (like Git's cat-file -p)
 func catFile(sha string) error {
 	objectType, content, err := readObject(sha)
@@ -188,6 +370,7 @@ func hashObject(filepath string) error {
 }
 
 // parseTreeEntries parses tree object content into structured entries
+
 func parseTreeEntries(content []byte) ([]TreeEntry, error) {
 	var entries []TreeEntry
 	index := 0
@@ -268,6 +451,35 @@ func lsTree(treeSHA string, nameOnly bool) error {
 	}
 
 	return nil
+}
+
+// createTreeFromIndex creates a tree object from the current index
+func createTreeFromIndex() (string, error) {
+	index, err := readIndex()
+	if err != nil {
+		return "", err
+	}
+
+	if len(index.Entries) == 0 {
+		return "", errors.New("nothing to commit (staging area is empty)")
+	}
+
+	// Sort entries by name (Git requirement)
+	sort.Slice(index.Entries, func(i, j int) bool {
+		return index.Entries[i].Path < index.Entries[j].Path
+	})
+
+	// Build tree content
+	var treeContent bytes.Buffer
+	for _, entry := range index.Entries {
+		// Format: <mode> <name>\0<20-byte SHA>
+		treeContent.WriteString(fmt.Sprintf("%s %s", entry.Mode, filepath.Base(entry.Path)))
+		treeContent.WriteByte(0)
+		shaBytes, _ := hex.DecodeString(entry.SHA)
+		treeContent.Write(shaBytes)
+	}
+
+	return writeObject(TreeObject, treeContent.Bytes())
 }
 
 // writeTree recursively creates tree objects for a directory
@@ -438,6 +650,160 @@ func handleCommitTree(args []string) error {
 	return nil
 }
 
+// NEW: Add command
+func handleAdd(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: gvc add <file>")
+	}
+
+	index, err := readIndex()
+	if err != nil {
+		return err
+	}
+
+	for _, filePath := range args {
+		// Check if file exists
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to stat file %s: %w", filePath, err)
+		}
+
+		// Read file content
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to read file %s: %w", filePath, err)
+		}
+
+		// Create blob object
+		sha, err := writeObject(BlobObject, data)
+		if err != nil {
+			return fmt.Errorf("failed to create blob for %s: %w", filePath, err)
+		}
+
+		// Determine file mode
+		mode := "100644" // Regular file
+		if fileInfo.Mode()&0111 != 0 {
+			mode = "100755" // Executable file
+		}
+
+		// Update index entry
+		entry := IndexEntry{
+			Path:    filePath,
+			SHA:     sha,
+			Mode:    mode,
+			Size:    fileInfo.Size(),
+			ModTime: fileInfo.ModTime(),
+		}
+
+		// Remove existing entry for this path
+		for i, existing := range index.Entries {
+			if existing.Path == filePath {
+				index.Entries = append(index.Entries[:i], index.Entries[i+1:]...)
+				break
+			}
+		}
+
+		// Add new entry
+		index.Entries = append(index.Entries, entry)
+	}
+
+	// Write updated index
+	if err := writeIndex(index); err != nil {
+		return err
+	}
+
+	fmt.Printf("Added %d file(s) to staging area\n", len(args))
+	return nil
+}
+
+// NEW: Commit command
+func handleCommit(args []string) error {
+	if len(args) < 2 || args[0] != "-m" {
+		return errors.New("usage: gvc commit -m <message>")
+	}
+
+	message := args[1]
+
+	// Create tree from current index
+	treeSHA, err := createTreeFromIndex()
+	if err != nil {
+		return err
+	}
+
+	// Get current commit as parent
+	parentSHA, err := getCurrentCommit()
+	if err != nil {
+		return fmt.Errorf("failed to get current commit: %w", err)
+	}
+
+	// Create commit object
+	commitSHA, err := commitTree(treeSHA, parentSHA, message)
+	if err != nil {
+		return err
+	}
+
+	// Update branch reference
+	if err := updateBranchRef(commitSHA); err != nil {
+		return fmt.Errorf("failed to update branch: %w", err)
+	}
+
+	// Clear index after successful commit
+	emptyIndex := Index{Entries: []IndexEntry{}}
+	if err := writeIndex(&emptyIndex); err != nil {
+		return fmt.Errorf("failed to clear index: %w", err)
+	}
+
+	fmt.Printf("[main %s] %s\n", commitSHA[:7], message)
+	return nil
+}
+
+// NEW: Log command
+func handleLog(args []string) error {
+	if len(args) > 0 {
+		return errors.New("usage: gvc log")
+	}
+	currentCommit, err := getCurrentCommit()
+	if err != nil {
+		return fmt.Errorf("failed to get current commit: %w", err)
+	}
+
+	if currentCommit == "" {
+		fmt.Println("No commits yet")
+		return nil
+	}
+
+	// Walk the commit history
+	commitSHA := currentCommit
+	for commitSHA != "" {
+		// Read commit object
+		objectType, content, err := readObject(commitSHA)
+		if err != nil {
+			return fmt.Errorf("failed to read commit %s: %w", commitSHA, err)
+		}
+
+		if objectType != CommitObject {
+			return fmt.Errorf("expected commit object, got %s", objectType)
+		}
+
+		// Parse commit
+		commit, err := parseCommit(commitSHA, content)
+		if err != nil {
+			return fmt.Errorf("failed to parse commit %s: %w", commitSHA, err)
+		}
+
+		// Display commit info
+		fmt.Printf("commit %s\n", commitSHA)
+		fmt.Printf("Author: %s\n", commit.Author)
+		fmt.Printf("Date: %s\n", commit.Timestamp.Format("Mon Jan 2 15:04:05 2006 -0700"))
+		fmt.Printf("\n    %s\n\n", commit.Message)
+
+		// Move to parent commit
+		commitSHA = commit.ParentSHA
+	}
+
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: gvc <command> [<args>...]")
@@ -462,6 +828,12 @@ func main() {
 		err = handleWriteTree(args)
 	case "commit-tree":
 		err = handleCommitTree(args)
+	case "add":
+		err = handleAdd(args)
+	case "commit":
+		err = handleCommit(args)
+	case "log":
+		err = handleLog(args)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		os.Exit(1)

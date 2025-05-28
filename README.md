@@ -1,6 +1,6 @@
 # 🧪 gvc — Go Version Control
 
-`gvc` is a minimal, Git-inspired version control system written in Go. It mirrors some of Git's core features, such as storing file contents as Git-style objects, managing trees, and handling repository metadata.
+`gvc` is a minimal, Git-inspired version control system written in Go. It stores file contents as Git-style objects, manages trees, and handles repository metadata.
 
 ---
 
@@ -15,16 +15,17 @@
   Hashes a file and stores it as a Git-style compressed blob object.
 
 - **`cat-file`**  
-  Decompresses and prints the contents of a stored blob object.
+  Decompresses and prints the contents of a stored object.
 
 - **`ls-tree`**  
-  Lists the contents of a tree object (snapshot of the directory structure).
+  Lists the contents of a tree object (snapshot of a directory).
 
 - **`write-tree`**  
-  Creates a tree object representing the current working directory.
+  Creates a tree object representing the current index state.
 
 - **`commit-tree`**  
-  Creates a commit object with the specified tree, parent, and commit message
+  Creates a commit object from a tree SHA, optional parent, and message.
+
 ---
 
 ## 🔧 Commands & Usage
@@ -33,39 +34,25 @@
 # Initialize repository
 $ gvc init
 
-# Hash a file and store it
+# Hash a file and store it as a blob object
 $ gvc hash-object -w file.txt
 
 # View object content by hash
 $ gvc cat-file -p <object-sha>
 
-# Write a tree from working directory
+# Write a tree from current index
 $ gvc write-tree
 
 # List the contents of a tree object
 $ gvc ls-tree <tree-sha>
 
-# Create a commit (initial commit without parent)
-$ ./gvc commit-tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904 -p "" -m "Initial commit"
-7d865e959b2466918c9863afca942d0fb89d7c9a
+# Create an initial commit (no parent)
+$ gvc commit-tree <tree-sha> -p \"\" -m \"Initial commit\"
 
-# Create a commit with parent
-$ ./gvc commit-tree <new-tree-hash> -p 7d865e959b2466918c9863afca942d0fb89d7c9a -m "Second commit"
-
-```
-
----
+# Create a commit with a parent
+$ gvc commit-tree <new-tree-sha> -p <parent-commit-sha> -m \"Second commit\"
 
 ## 🧩 Work in Progress (TODO)
-
-- **`add`**  
-  Adds files to the **index** (staging area) to include in the next commit.
-
-- **`commit`**  
-  Records a snapshot of the project state with metadata (author, message, timestamp, etc.).
-
-- **`log`**  
-  Displays the commit history from the current branch.
 
 - **`clone`**  
   Initializes a new gvc repository from a remote one (placeholder for now).
@@ -92,6 +79,8 @@ $ ./gvc commit-tree <new-tree-hash> -p 7d865e959b2466918c9863afca942d0fb89d7c9a 
 ├── objects/       # Stores all objects (blobs, trees, commits)
 ├── refs/          # Stores references to branches
 └── HEAD           # Points to the current branch
+└── index          # staging area (stores info of the files using add command)
+
 ```
 
 ## Built With
