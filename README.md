@@ -54,6 +54,9 @@ $ gvc commit-tree <new-tree-sha> -p <parent-commit-sha> -m \"Second commit\"
 
 ## 🧩 Work in Progress (TODO)
 
+- **`add .`**  
+  currently . is not supported with add 
+  
 - **`clone`**  
   Initializes a new gvc repository from a remote one (placeholder for now).
 
