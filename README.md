@@ -4,6 +4,35 @@
 
 ---
 
+## 📥 Installation
+
+### 🔧 Prerequisites
+- [Go](https://golang.org/dl/) 1.18 or higher installed
+
+### 🛠️ Build from Source
+
+Clone the repository and build:
+
+For Unix/MacOS
+```bash
+git clone https://github.com/Ritikchauhan1704/Gvc-Go-version-control.git
+cd Gvc-Go-version-control
+go build -o gvc ./app
+./gvc init   # Unix/macOS
+```
+
+For Windows
+```bash
+git clone https://github.com/Ritikchauhan1704/Gvc-Go-version-control.git
+cd Gvc-Go-version-control
+go build -o gvc.exe ./app
+./gvc.exe init  
+```
+Without Building
+```bash
+go run app/main.go init
+```
+
 ## 📦 Features
 
 ### ✅ Implemented
