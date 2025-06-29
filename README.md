@@ -1,4 +1,4 @@
-# GVC — Go Version Control
+# GVC : Go Version Control
 
 `GVC` is a minimal, Git-inspired version control system written in Go. It mirrors some of Git's core features, such as storing file contents as Git-style objects, managing trees, and handling repository metadata.
 
