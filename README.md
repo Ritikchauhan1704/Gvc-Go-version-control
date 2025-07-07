@@ -33,7 +33,7 @@ Without Building
 go run app/main.go init
 ```
 
-## 📦 Features
+## Features
 
 ### ✅ Implemented
 
